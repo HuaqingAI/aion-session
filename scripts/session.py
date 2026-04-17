@@ -11,16 +11,45 @@ import time
 from typing import Optional, Dict, Any
 from websocket import create_connection, WebSocketException
 
+# Fix encoding for Windows
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
 class AionUISessionManager:
-    def __init__(self, ws_url: str = "ws://localhost:25808/", timeout: int = 30):
+    def __init__(self, ws_url: str = "ws://localhost:25808/", timeout: int = 30,
+                 session_token: Optional[str] = None, csrf_token: Optional[str] = None):
         self.ws_url = ws_url
         self.timeout = timeout
+        self.session_token = session_token
+        self.csrf_token = csrf_token
         self.ws = None
 
     def connect(self):
         """Connect to WebSocket server"""
         try:
-            self.ws = create_connection(self.ws_url, timeout=self.timeout)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Origin": "http://localhost:25808",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache"
+            }
+
+            cookie_str = "multica_logged_in=1; sidebar_state=true"
+            if self.session_token:
+                cookie_str += f"; aionui-session={self.session_token}"
+            if self.csrf_token:
+                cookie_str += f"; csrfToken={self.csrf_token}"
+
+            headers["Cookie"] = cookie_str
+
+            self.ws = create_connection(
+                self.ws_url,
+                timeout=self.timeout,
+                ping_interval=30,
+                ping_timeout=10,
+                header=headers
+            )
         except Exception as e:
             self._error(f"Failed to connect to {self.ws_url}: {e}")
 
@@ -54,7 +83,10 @@ class AionUISessionManager:
 
         while time.time() - start_time < self.timeout:
             try:
+                self.ws.settimeout(1)
                 response = self.ws.recv()
+                if not response:
+                    continue
                 msg = json.loads(response)
 
                 if msg.get("name") == expected_callback:
@@ -62,7 +94,9 @@ class AionUISessionManager:
             except json.JSONDecodeError:
                 continue
             except Exception as e:
-                self._error(f"Error receiving response: {e}")
+                if "timed out" not in str(e).lower():
+                    self._error(f"Error receiving response: {e}")
+                continue
 
         self._error(f"Timeout waiting for response (expected: {expected_callback})")
 
@@ -145,7 +179,9 @@ class AionUISessionManager:
     @staticmethod
     def _output(data: Dict[str, Any]):
         """Output JSON to stdout"""
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        output = json.dumps(data, ensure_ascii=False, indent=2)
+        sys.stdout.write(output)
+        sys.stdout.write('\n')
 
     @staticmethod
     def _error(message: str):
@@ -162,6 +198,8 @@ def main():
                        help="WebSocket URL (default: ws://localhost:25808/)")
     parser.add_argument("--timeout", type=int, default=30,
                        help="Timeout in seconds (default: 30)")
+    parser.add_argument("--session-token", help="AionUI session JWT token")
+    parser.add_argument("--csrf-token", help="CSRF token")
 
     # Create options
     parser.add_argument("--name", default="新会话",
@@ -182,7 +220,12 @@ def main():
 
     args = parser.parse_args()
 
-    manager = AionUISessionManager(ws_url=args.ws_url, timeout=args.timeout)
+    manager = AionUISessionManager(
+        ws_url=args.ws_url,
+        timeout=args.timeout,
+        session_token=args.session_token,
+        csrf_token=args.csrf_token
+    )
 
     try:
         manager.connect()
