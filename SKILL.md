@@ -52,8 +52,42 @@ uv run --with websocket-client scripts/batch_dispatch.py --plan assets/batch-pla
 ## Authentication And Endpoint Handling
 
 - Default WebSocket URL is `ws://localhost:25808/`.
-- Pass `--session-token` and `--csrf-token` when the local AionUI instance requires authenticated cookies.
-- You can also use environment variables: `AIONUI_WS_URL`, `AIONUI_SESSION_TOKEN`, and `AIONUI_CSRF_TOKEN`.
+- **Authentication is required.** Pass `--session-token` and `--csrf-token` when connecting to AionUI. Without them the connection will be rejected with a 401/403 error.
+- Tokens are resolved in this priority order: CLI args → env vars (`AIONUI_SESSION_TOKEN`, `AIONUI_CSRF_TOKEN`) → saved cookie file (`~/.aionui_cookies.json`).
+- To retrieve tokens: open AionUI in a browser → DevTools → Application → Cookies → copy `aionui-session` (session token) and `csrfToken` (CSRF token).
+- **Save tokens once** so you never need to pass them again:
+
+```powershell
+uv run scripts/aionui_session.py save-cookies --session-token TOKEN --csrf-token TOKEN
+```
+
+- To remove saved tokens:
+
+```powershell
+uv run scripts/aionui_session.py clear-cookies
+```
+
+- If the connection fails with an auth error, ask the user to run `save-cookies` with fresh tokens from their browser.
+
+## Session Modes
+
+Control the permission level of a created session with `--session-mode`:
+
+| Value | Meaning |
+|---|---|
+| `default` | Standard permission prompts (default) |
+| `bypassPermissions` | Skip most permission prompts |
+| `yolo` | Maximum permissions — no prompts at all |
+
+Example:
+
+```powershell
+uv run scripts/aionui_session.py create --name "Worker A" --backend codex --workspace "D:\work" --session-mode yolo
+```
+
+## Message Dispatch
+
+`send` is **fire-and-forget**: the script confirms the WebSocket frame was sent and returns immediately. It does not wait for the agent to finish processing. The response will be `{"status": "dispatched", ...}` — this is expected and correct.
 
 ## Batch Plan Rules
 

@@ -20,7 +20,32 @@ DEFAULT_TIMEOUT = 30
 DEFAULT_CONVERSATION_NAME = "New Session"
 DEFAULT_SESSION_MODE = "default"
 COOKIE_BASE = "multica_logged_in=1; sidebar_state=true"
+COOKIE_FILE = os.path.join(os.path.expanduser("~"), ".aionui_cookies.json")
 JSONDict = Dict[str, Any]
+
+
+def _load_saved_cookies() -> tuple[Optional[str], Optional[str]]:
+    """Load session_token and csrf_token from the local cookie file if it exists."""
+    if not os.path.exists(COOKIE_FILE):
+        return None, None
+    try:
+        with open(COOKIE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("session_token"), data.get("csrf_token")
+    except Exception:
+        return None, None
+
+
+def _save_cookies(session_token: str, csrf_token: str) -> None:
+    """Persist tokens to the local cookie file."""
+    with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"session_token": session_token, "csrf_token": csrf_token}, f, indent=2)
+
+
+def _clear_cookies() -> None:
+    """Remove the local cookie file."""
+    if os.path.exists(COOKIE_FILE):
+        os.remove(COOKIE_FILE)
 
 
 def _configure_stdio() -> None:
@@ -119,6 +144,20 @@ class AionUISessionManager:
                 "'uv run --with websocket-client ...'."
             ) from exc
 
+        cookie = self._build_cookie_header()
+        if not self.session_token or not self.csrf_token:
+            _emit_json(
+                {
+                    "warning": (
+                        f"No auth tokens found (checked CLI args, env vars, and {COOKIE_FILE}). "
+                        "Connection may be rejected with 401. "
+                        "Run: aionui_session.py save-cookies --session-token TOKEN --csrf-token TOKEN "
+                        "to persist tokens for future use."
+                    )
+                },
+                stream=sys.stderr,
+            )
+
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -127,7 +166,7 @@ class AionUISessionManager:
             "Origin": "http://localhost:25808",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
-            "Cookie": self._build_cookie_header(),
+            "Cookie": cookie,
         }
 
         try:
@@ -139,6 +178,14 @@ class AionUISessionManager:
                 header=headers,
             )
         except Exception as exc:
+            err_str = str(exc).lower()
+            if "401" in err_str or "403" in err_str or "handshake" in err_str or "status" in err_str:
+                raise AionUIError(
+                    f"Failed to connect to {self.ws_url}: {exc}\n"
+                    "Hint: AionUI requires authentication. Provide --session-token and "
+                    "--csrf-token (or set AIONUI_SESSION_TOKEN / AIONUI_CSRF_TOKEN). "
+                    "Retrieve these from your browser's DevTools → Application → Cookies."
+                ) from exc
             raise AionUIError(f"Failed to connect to {self.ws_url}: {exc}") from exc
 
     def disconnect(self) -> None:
@@ -203,6 +250,14 @@ class AionUISessionManager:
         message: str,
         files: Optional[list[Any]] = None,
     ) -> JSONDict:
+        """Send a message to a conversation (fire-and-forget).
+
+        AionUI processes messages asynchronously and does not send a callback
+        after dispatch, so we only confirm the WebSocket send succeeded.
+        """
+        if self.ws is None:
+            raise AionUIError("WebSocket is not connected.")
+
         request_id = self._generate_id("chat.send.message")
         payload = {
             "input": message,
@@ -210,7 +265,28 @@ class AionUISessionManager:
             "conversation_id": conversation_id,
             "files": files or [],
         }
-        return self._send_request("subscribe-chat.send.message", request_id, payload)
+        request = {
+            "name": "subscribe-chat.send.message",
+            "data": {"id": request_id, "data": payload},
+        }
+        try:
+            self.ws.send(json.dumps(request))
+        except Exception as exc:
+            raise AionUIError(f"Failed to send message: {exc}") from exc
+
+        # Best-effort liveness check: try to read any pending frame for up to 1 s.
+        # A clean connection will either return a frame or time out — both are fine.
+        # An error here means the connection dropped before/during the send.
+        try:
+            self.ws.settimeout(1)
+            self.ws.recv()
+        except Exception as exc:
+            if "timed out" not in str(exc).lower():
+                raise AionUIError(
+                    f"Message may not have been delivered — connection error after send: {exc}"
+                ) from exc
+
+        return {"status": "dispatched", "conversation_id": conversation_id, "request_id": request_id}
 
     def delete_conversation(self, conversation_id: str) -> JSONDict:
         request_id = self._generate_id("remove-conversation")
@@ -327,17 +403,28 @@ def _load_model(model_json: Optional[str], model_file: Optional[str]) -> Optiona
 
 
 def _manager_from_args(args: argparse.Namespace) -> AionUISessionManager:
+    session_token = args.session_token
+    csrf_token = args.csrf_token
+
+    # Fall back to saved cookies when tokens are not provided on the CLI / env
+    if not session_token or not csrf_token:
+        saved_session, saved_csrf = _load_saved_cookies()
+        if saved_session and not session_token:
+            session_token = saved_session
+        if saved_csrf and not csrf_token:
+            csrf_token = saved_csrf
+
     return AionUISessionManager(
         ws_url=args.ws_url,
         timeout=args.timeout,
-        session_token=args.session_token,
-        csrf_token=args.csrf_token,
+        session_token=session_token,
+        csrf_token=csrf_token,
     )
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AionUI session manager")
-    parser.add_argument("action", choices=["create", "delete", "list", "send"])
+    parser.add_argument("action", choices=["create", "delete", "list", "send", "save-cookies", "clear-cookies"])
     parser.add_argument(
         "--ws-url",
         default=os.getenv("AIONUI_WS_URL", DEFAULT_WS_URL),
@@ -395,6 +482,21 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     manager = _manager_from_args(args)
+
+    # Cookie management actions — no WebSocket needed
+    if args.action == "save-cookies":
+        if not args.session_token or not args.csrf_token:
+            raise SystemExit(
+                _emit_json({"error": "--session-token and --csrf-token are required for save-cookies."}, stream=sys.stderr) or 1
+            )
+        _save_cookies(args.session_token, args.csrf_token)
+        _emit_json({"status": "saved", "path": COOKIE_FILE})
+        return 0
+
+    if args.action == "clear-cookies":
+        _clear_cookies()
+        _emit_json({"status": "cleared", "path": COOKIE_FILE})
+        return 0
 
     try:
         manager.connect()
