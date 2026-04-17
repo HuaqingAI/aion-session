@@ -1,0 +1,20 @@
+{
+  "defaults": {
+    "type": "acp",
+    "backend": "codex",
+    "workspace": "D:\\path\\to\\workspace",
+    "session_mode": "default",
+    "ws_url": "ws://localhost:25808/",
+    "timeout": 30
+  },
+  "tasks": [
+    {
+      "name": "Parallel Worker 1",
+      "message": "Inspect the target module and return the top implementation risks."
+    },
+    {
+      "name": "Parallel Worker 2",
+      "message": "Draft the implementation plan for the same feature with assumptions and open questions."
+    }
+  ]
+}

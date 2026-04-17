@@ -1,0 +1,4 @@
+interface:
+  display_name: "AionUI Multi Session"
+  short_description: "Batch-manage AionUI sessions and parallel task dispatch"
+  default_prompt: "Use $aionui-multi-session to create and batch-dispatch AionUI conversations for a parallel task plan."
